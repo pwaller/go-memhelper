@@ -10,18 +10,22 @@ package memhelper
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-var GRACE_ABS = flag.Int64("needram.abs", 100, "absolute ram to leave left over (MB)")
-var GRACE_REL = flag.Int64("needram.rel", 20, "(%%) of free memory at program start to leave")
-var debug = flag.Bool("needram.debug", false, "print debug messages for needram")
+var GRACE_ABS = flag.Int64("memhelper.abs", 100, "absolute ram to leave left over (MB)")
+var GRACE_REL = flag.Int64("memhelper.rel", 20, "(%%) of free memory at program start to leave")
+var debug = flag.Bool("memhelper.debug", false, "print debug messages for needram")
 
-var GC_EVERY = flag.Duration("needram.gc", 0, "force garbage collection (0 = off)")
+var GC_EVERY = flag.Duration("memhelper.gc", 0, "force garbage collection (0 = off)")
 
 // Amount of memory which was spare when the program started
 var SPARE_AT_PROGRAM_START ByteSize = SystemSpareMemory()
@@ -181,7 +185,7 @@ type Request struct {
 var request chan Request = make(chan Request)
 
 // A constant used to internally by the processor to schedule the thinking needed
-const request_sentinel Request = Request{amount: -1}
+var request_sentinel Request = Request{amount: -1}
 
 // A permanently running goroutine to service requests to reserve memory
 // TODO: Finish the implementation
@@ -222,10 +226,37 @@ func ProcessRequests() {
 // subtracted from the available memory to prevent multiple goroutines
 // overcommitting.
 // Example:
-//   <-BlockUntilSpare(10*memhelper.MB, 10*time.Millisecond)
+//   used := <-BlockUntilSpare(10*memhelper.MB, 10*time.Millisecond)
 //   make([]byte, 10*1024*1024)
+//   used <- true
 func BlockUntilSpare(amount ByteSize, duration time.Duration) <-chan bool {
 	r := Request{amount: amount, duration: duration, satisfied: make(chan bool)}
 	request <- r
 	return r.satisfied
+}
+
+func PrintProcStat() {
+	log.Print("GOOS: ", runtime.GOOS)
+	if runtime.GOOS != "linux" {
+		log.Panic("PrintProcStat() not implemented for systems other than linux")
+	}
+	fd, err := os.Open("/proc/self/stat")
+	if err != nil {
+		panic(err)
+	}
+	bytes, err := ioutil.ReadAll(fd)
+	if err != nil {
+		panic(err)
+	}
+	s := string(bytes)
+	parts := strings.Split(s, " ")
+	rss_pages, err := strconv.ParseInt(parts[23], 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	vss, err := strconv.ParseInt(parts[22], 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("Stat: %v %v", ByteSize(vss), ByteSize(rss_pages*4096))
 }
