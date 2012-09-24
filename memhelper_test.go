@@ -6,47 +6,46 @@ package memhelper
 import (
 	"log"
 	"math/rand"
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/pwaller/go-deathtest"
 )
 
 func Alloc(N ByteSize) []byte {
 	result := make([]byte, int(N))
-	log.Printf("Alloc(%v)", N)
+	log.Printf("Alloc(%.2b)", N)
 	PrintStats()
 	return result
 }
 
 func TestNeedRAM(t *testing.T) {
+	return
 	log.Print("Testing.. ram = ", SpareMemory())
 	var b []byte
 	for i := 0; i < 10; i++ {
-		nb := 1 * GB
+		nb := 1 * GiB
 		log.Printf("allocing %v", nb)
-		//b = 
 		Alloc(nb)
 		log.Printf("deallocing %v", nb)
 		b = []byte{}
+		PrintStats()
+		runtime.GC()
+		PrintStats()
+		_ = b
 	}
-	log.Print("Testing.. ram = ", SpareMemory())
-
-	Alloc(2*GB - 1*KB)
-	time.Sleep(1 * time.Second)
-	log.Printf("b length: %d", b)
 }
 
 func TestRAMBlocking(t *testing.T) {
 	return
-	done := make(chan bool)
-	go func() {
-		<-BlockUntilSpare(1*GB, 1*time.Second)
-		///
-		done <- true
-	}()
-	<-done
 }
 
 func TestOvercommit(t *testing.T) {
+	return
+	if !deathtest.Run(t) {
+		return
+	}
 	defer func() {
 		if x := recover(); x != nil {
 			log.Print("x= ", x)
@@ -57,7 +56,7 @@ func TestOvercommit(t *testing.T) {
 
 	a := make([][]byte, 0)
 	for i := 0; i < 15; i++ {
-		b := Alloc(1 * GB)
+		b := Alloc(1 * GiB)
 		for i := 0; i < nrand; i++ {
 			b[rand.Intn(int(len(b)))] = byte(rand.Uint32() % 8)
 		}
@@ -70,35 +69,26 @@ func TestOvercommit(t *testing.T) {
 }
 
 func TestFailure(t *testing.T) {
+	if !deathtest.Run(t) {
+		return
+	}
 	finish := make(chan bool)
 
-	Nbyte := 100
-	randomvalues := make([]byte, 0)
-	randbyte := make(chan byte)
-	go func() {
-		for {
-			randomvalues = append(randomvalues, <-randbyte)
-		}
-	}()
-
 	bigalloc := func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Print("Recovered from panic: ", r)
-			}
-		}()
-		a := Alloc(1 * GB)
-		log.Printf("len(a) = %d", len(a))
-		for i := 0; i < Nbyte; i++ {
-			randbyte <- a[rand.Intn(int(len(a)))]
+		//runtime.GC()
+		a := Alloc(1 * GiB)
+		for i := 0; i < len(a); i += int(4 * kiB) {
+			//a[rand.Intn(int(len(a)))] = 1
+			a[i] = 1
 		}
 		<-finish
+		//log.Print("a[100] = ", a[100])
 	}
 
 	N := 20
 	for i := 0; i < N; i++ {
 		go bigalloc()
-		time.Sleep(1 * time.Second)
+		time.Sleep(1000 * time.Millisecond)
 	}
 
 	log.Print("Goroutines started..")
@@ -107,4 +97,6 @@ func TestFailure(t *testing.T) {
 	for i := 0; i < N; i++ {
 		finish <- true
 	}
+
+	log.Print("MaxRSS: ", GetMaxRSS())
 }

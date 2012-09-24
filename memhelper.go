@@ -10,6 +10,7 @@ package memhelper
 import (
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -31,7 +32,7 @@ var GC_EVERY = flag.Duration("memhelper.gc", 0, "force garbage collection (0 = o
 var SPARE_AT_PROGRAM_START ByteSize = SystemSpareMemory()
 
 func init() {
-	flag.Parse()
+	//flag.Parse()
 	if *GC_EVERY != 0 {
 		if *debug {
 			log.Printf("Will GC() every %v", *GC_EVERY)
@@ -57,12 +58,13 @@ func init() {
 // A pretty-printing/parsing number of bytes
 // TODO: Implement parsing (so we satisfy flag.Var)
 // This is done to avoid repeatedly allocating these structures
-var memstats *runtime.MemStats = new(runtime.MemStats)
-var sysinfo *syscall.Sysinfo_t = new(syscall.Sysinfo_t)
+var memstats = new(runtime.MemStats)
+var sysinfo = new(syscall.Sysinfo_t)
+var rusage = new(syscall.Rusage)
 
 // Not sure if the mutex is the most efficient thing to be doing here, but
 // let's run with it for the moment
-var memstats_mutex, sysinfo_mutex *sync.RWMutex = new(sync.RWMutex), new(sync.RWMutex)
+var memstats_mutex, sysinfo_mutex, rusage_mutex = new(sync.RWMutex), new(sync.RWMutex), new(sync.RWMutex)
 
 func update_sysinfo() {
 	sysinfo_mutex.Lock()
@@ -73,12 +75,62 @@ func update_sysinfo() {
 	}
 }
 
+func update_rusage() {
+	rusage_mutex.Lock()
+	defer rusage_mutex.Unlock()
+	err := syscall.Getrusage(syscall.RUSAGE_SELF, rusage)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func GetMaxRSS() ByteSize {
+	update_rusage()
+	return ByteSize(rusage.Maxrss) * kiB
+}
+
+// There must be a better way if we call this a lot..
+func meminfo() (total, free, buffers, cached ByteSize) {
+	fd, err := os.Open("/proc/meminfo")
+	defer fd.Close()
+	if err != nil {
+		panic(err)
+	}
+
+	mapping := map[string]*ByteSize{
+		"MemTotal": &total,
+		"MemFree":  &free,
+		"Buffers":  &buffers,
+		"Cached":   &cached,
+	}
+
+	var name, unit string
+	var value int64
+
+	for {
+		n, err := fmt.Fscanln(fd, &name, &value, &unit)
+		if err == io.EOF {
+			break
+		}
+		if n < 2 {
+			continue
+		}
+		what, present := mapping[name[:len(name)-1]]
+		if present {
+			*what = ByteSize(value) * kiB
+		}
+	}
+
+	return
+}
+
 // Return the total amount of memory (including caches) on the system
 func SystemSpareMemory() ByteSize {
 	update_sysinfo()
 	sysinfo_mutex.RLock()
 	defer sysinfo_mutex.RUnlock()
-	return ByteSize(sysinfo.Freeram + sysinfo.Bufferram)
+	_, free, _, cached := meminfo()
+	return ByteSize(free + cached) //sysinfo.Freeram + sysinfo.Bufferram)
 }
 
 // 
@@ -119,8 +171,10 @@ func PrintStats() {
 	update_memstats()
 	memstats_mutex.RLock()
 	defer memstats_mutex.RUnlock()
-	log.Printf("   Alloc    Total      Sys  | Heap-> |   Alloc      Sys     Idle    Inuse    Relsd        N")
-	log.Printf("%8v %8v %8v            %8v %8v %8v %8v %8v %8d",
+	log.Printf("     SysSp      Alloc      Total        Sys  | Heap-> |     Alloc" +
+		"        Sys       Idle      Inuse      Relsd        N")
+	log.Printf("%10.2b %10.2b %10.2b %10.2b            %10.2b %10.2b %10.2b %10.2b %10.2b %8d",
+		SystemSpareMemory(),
 		ByteSize(memstats.Alloc), ByteSize(memstats.TotalAlloc),
 		ByteSize(memstats.Sys), ByteSize(memstats.HeapAlloc),
 		ByteSize(memstats.HeapSys), ByteSize(memstats.HeapIdle),
@@ -212,7 +266,7 @@ func BlockUntilSpare(amount ByteSize, duration time.Duration) <-chan bool {
 }
 
 func PrintProcStat() {
-	log.Print("GOOS: ", runtime.GOOS)
+	//log.Print("GOOS: ", runtime.GOOS)
 	if runtime.GOOS != "linux" {
 		log.Panic("PrintProcStat() not implemented for systems other than linux")
 	}
